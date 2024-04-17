@@ -1,8 +1,57 @@
-version: '3'
+version: '3.8'
 services:
   ollama:
     image: ollama/ollama
-    volumes:
-      - /private/var/services/ollama:/root/.ollama
+    restart: always
     ports:
       - 11434:11434
+    depends_on:
+      - mongo
+    #  - mongo-express
+    volumes:
+      - ./data/ollama:/root/.ollama
+    # deploy:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # devices:
+    #   - driver:nvidia
+    #   - count:1
+    #   - capabilities:[gpu]
+  ollama-webui:
+    image: ghcr.io/ollama-webui/ollama-webui:main
+    container_name: ollama-webui
+    volumes:
+      - ./ollama/ollama-webui:/app/backend/data
+    depends_on:
+      - ollama
+    ports:
+      - 3000:8080
+    environment:
+      - '/ollama/api=http://ollama:11434/api'
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+  mongo:
+    image: mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+
+  # mongo-express:
+  #   image: mongo-express
+  #   restart: always
+  #   ports:
+  #     - 8081:8081
+  #   depends_on:
+  #     - mongo
+  #   environment:
+  #     ME_CONFIG_MONGODB_ADMINUSERNAME: root
+  #     ME_CONFIG_MONGODB_ADMINPASSWORD: example
+  #     ME_CONFIG_MONGODB_URL: mongodb://root:example@mongo:27017/
