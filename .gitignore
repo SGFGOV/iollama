@@ -12,3 +12,4 @@ data/
 ollama/
 tmp/
 graph_*/
+processing/

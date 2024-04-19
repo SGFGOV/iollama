@@ -40,6 +40,7 @@ nebula_host = os.environ["NEBULA_HOST"]
 nebula_port = os.environ["NEBULA_PORT"]
 INPUT_DIR = "./docs"
 TEMP_INPUT_DIR = f"./tmp"
+TEMP_PROCESSING_DIR =f"./processing"
 COLLECTION_NAME = "iollama"
 embedding = None
 GRAPH_DIR = "./graph_2"
@@ -166,7 +167,12 @@ def generate_nebula_graph_single_document_and_persist(
         kg_index.refresh(documents, show_progress=True)
         storage_context.persist(GRAPH_DIR)
     except Exception as e:
-        logging.error("something went wrong" )
+        logging.error("something went wrong, unable to refresh...skipping " )
+        # for doc in documents:
+        #     try:
+        #         kg_index.insert(doc)
+        #     except Exception as f:
+        #         logging.error("unable to insert, " )
     return kg_index, storage_context
 
 
@@ -201,18 +207,23 @@ def delete_temp():
 
 def copy_files_to_temp(document_paths: List[str]):
     destination_dir = TEMP_INPUT_DIR
+    backup_dir = TEMP_PROCESSING_DIR
     os.makedirs(destination_dir, exist_ok=True)
+    os.makedirs(backup_dir, exist_ok=True)
 
     for document_path in tqdm(document_paths, "copying files"):
         # Specify the source file path
         source = document_path
         file_name = source.split("/")[-1]
         destination = destination_dir + "/" + file_name
+        backup_dest = backup_dir + "/" + file_name
         # Specify the destination file path
         # Copy the content of source to destination
         try:
             shutil.copyfile(source, destination)
+            shutil.copyfile(source,backup_dest)
             log = f'File copied successfully... {file_name}'
+            os.remove(source)
             logging.info(log)
         except shutil.SameFileError:
             logging.error("Source and destination are the same file.")
@@ -224,22 +235,21 @@ def copy_files_to_temp(document_paths: List[str]):
             logging.error("Error occurred while copying file.")
 
 
-def update_document_index(storage_context: StorageContext, session: Session):
+def update_document_index(storage_context: StorageContext, session: Session,update_index:KnowledgeGraphIndex):
 
     if os.path.exists(TEMP_INPUT_DIR):
         pdf_parts = load_documents(local_path=TEMP_INPUT_DIR)
         logging.info(f'There are {len(pdf_parts)} nodes to process')
-        try:
-            old_index = load_index_from_storage(storage_context)
-            update_index = old_index
+        if update_index != None:
+           # old_index = load_index_from_storage(storage_context)
+           # update_index = old_index
             skip = False
-        except Exception as e:
+        else:
             logging.info("unable to loadindices")
             skip = True
             update_index, _ = init_index(
                 pdf_parts, storage_context=storage_context, session=session
             )
-            logging.info(e)
         if not skip:
             update_index, _ = generate_nebula_graph_single_document_and_persist(
                 documents=pdf_parts, storage_context=storage_context, kg_index=update_index
@@ -272,6 +282,12 @@ def init_kg_index(group_size=5) -> KnowledgeGraphIndex:
         storage_context, session, connection_pool = get_graph_store()
     batch: List[str] = []
     # Use os.walk to list all files in the directory and its subdirectories
+    try:
+        old_index = load_index_from_storage(storage_context)
+        update_index = old_index
+        skip = False
+    except Exception as e:
+        logging.error(e)
     for root, dirs, files in os.walk(dir_path):
         for idx, file in tqdm(enumerate(files), "generating paths"):
             # Construct the full file path
@@ -283,14 +299,16 @@ def init_kg_index(group_size=5) -> KnowledgeGraphIndex:
         if not remainder:
             copy_files_to_temp(batch)
             update_index = update_document_index(
-                storage_context=storage_context, session=session
+                storage_context=storage_context, session=session,
+                update_index=update_index
             )
             batch.clear()
             delete_temp()
     if len(batch) < group_size:
         copy_files_to_temp(batch)
         update_index = update_document_index(
-            storage_context=storage_context, session=session
+            storage_context=storage_context, session=session,
+            update_index=update_index
         )
         batch.clear()
         delete_temp()
@@ -391,10 +409,31 @@ def chat_cmd(index):
         except Exception as e:
             if hasattr(e, "message"):
                 logging.error(e.message)
-
-
+def get_existing_index() -> KnowledgeGraphIndex:
+    # Specify the directory path
+    dir_path = INPUT_DIR
+    document_paths: List[str] = []
+    session = None
+    old_index= None
+    try:
+     storage_context, session, connection_pool = get_graph_store()
+    except Exception:
+        logging.info("database isn't initilaized")
+    if not session:
+        status, session, connection_pool = create_graph_connection()
+        storage_context, session, connection_pool = get_graph_store()
+    batch: List[str] = []
+    # Use os.walk to list all files in the directory and its subdirectories
+    try:
+        old_index = load_index_from_storage(storage_context)
+    except Exception as e:
+        if hasattr(e,"message"):
+            logging.error(e.message)
+        else :
+            logging.error("unable to retrieve store")
+    return old_index
 init_kg_llm()
 
 if __name__ == "__main__":
-    index,_ = init_kg_index(2)
+    index,_ = init_kg_index(10)
     chat_cmd(index)
