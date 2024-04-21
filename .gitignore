@@ -13,3 +13,5 @@ ollama/
 tmp/
 graph_*/
 processing/
+*.html
+visuals/

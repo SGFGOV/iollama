@@ -3,7 +3,7 @@ import logging
 import sys
 import time
 import shutil
-
+import pandas as pd
 import chromadb
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -18,6 +18,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import Settings
 from llama_index.core.query_engine import KnowledgeGraphQueryEngine
 from llama_index.graph_stores.nebula import NebulaGraphStore
+from visualize import visualize
 
 from nebula3.gclient.net import Session
 from nebula3.gclient.net import ConnectionPool
@@ -27,6 +28,7 @@ import config
 
 load_dotenv()
 
+batch_data_frame = pd.DataFrame(columns=["batch","process time","batch time"])
 
 SPACE_NAME = "llamaindex"
 edge_types, rel_prop_names = ["relationship"], [
@@ -163,8 +165,12 @@ def generate_nebula_graph_single_document_and_persist(
         
         
 
-    
-        kg_index.refresh(documents, show_progress=True)
+        start_refresh_part_time = time.time()
+        kg_index.refresh(documents, show_progress=True,num_workers=4)
+        end_refresh_part_titme = time.time()
+        time_taken_refresh = end_refresh_part_titme-start_refresh_part_time
+        logging.info(f"Time taken for processing refresh: {time_taken_refresh:.5f} seconds")
+            
         storage_context.persist(GRAPH_DIR)
     except Exception as e:
         logging.error("something went wrong, unable to refresh...skipping " )
@@ -234,40 +240,84 @@ def copy_files_to_temp(document_paths: List[str]):
         except Exception:
             logging.error("Error occurred while copying file.")
 
+def process_index(storage_context:StorageContext,pdf_parts:List[Document],
+                  session:Session,update_index:KnowledgeGraphIndex):
+    logging.info(f'There are {len(pdf_parts)} nodes to process')
+    if update_index != None:
+        # old_index = load_index_from_storage(storage_context)
+        # update_index = old_index
+        skip = False
+    else:
+        logging.info("unable to loadindices")
+        skip = True
+        update_index, _ = init_index(
+            pdf_parts, storage_context=storage_context, session=session
+        )
+    if not skip:
+        update_index, _ = generate_nebula_graph_single_document_and_persist(
+            documents=pdf_parts, storage_context=storage_context, kg_index=update_index
+        )
+    # for i in enumerate(documents):
+    #     if i[0] == 0 and skip:
+    #         continue
+    #     try:
+    #         update_index,_ = generate_nebula_graph_single_document_and_persist(
+    #             document=documents[i[0]], storage_context=storage_context, index=update_index
+    #         )
+    #     except Exception as e:
+    #         logging.error(e)
+    os.makedirs(GRAPH_DIR, exist_ok=True)
+    storage_context.persist(GRAPH_DIR)
+    return update_index
 
-def update_document_index(storage_context: StorageContext, session: Session,update_index:KnowledgeGraphIndex):
 
+def update_document_index(storage_context: StorageContext, session: Session,
+                          update_index:KnowledgeGraphIndex)->KnowledgeGraphIndex:
+    global batch_data_frame
     if os.path.exists(TEMP_INPUT_DIR):
+        files = os.listdir(TEMP_INPUT_DIR)
+        logging.info(f' number of files to process = {len(files)}')
         pdf_parts = load_documents(local_path=TEMP_INPUT_DIR)
-        logging.info(f'There are {len(pdf_parts)} nodes to process')
-        if update_index != None:
-           # old_index = load_index_from_storage(storage_context)
-           # update_index = old_index
-            skip = False
-        else:
-            logging.info("unable to loadindices")
-            skip = True
-            update_index, _ = init_index(
-                pdf_parts, storage_context=storage_context, session=session
-            )
-        if not skip:
-            update_index, _ = generate_nebula_graph_single_document_and_persist(
-                documents=pdf_parts, storage_context=storage_context, kg_index=update_index
-            )
-        # for i in enumerate(documents):
-        #     if i[0] == 0 and skip:
-        #         continue
-        #     try:
-        #         update_index,_ = generate_nebula_graph_single_document_and_persist(
-        #             document=documents[i[0]], storage_context=storage_context, index=update_index
-        #         )
-        #     except Exception as e:
-        #         logging.error(e)
-        os.makedirs(GRAPH_DIR, exist_ok=True)
-        storage_context.persist(GRAPH_DIR)
-        return update_index
+                # Define a list
+        #pdf_parts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
+        # Determine the batch size
+        batch_size = 1
 
+        # Calculate the number of batches
+        num_batches = len(pdf_parts) // batch_size
+        if len(pdf_parts) % batch_size != 0:
+            num_batches += 1
+        os.makedirs('./visuals/parts',exist_ok=True)
+        # Process each batch
+        for i in tqdm(range(num_batches)):
+            # Calculate the start and end indices for the current batch
+            start_index = i * batch_size
+            end_index = start_index + batch_size
+            
+            # Slice the list to get the current batch
+            batch = pdf_parts[start_index:end_index]
+            start_time = time.time()
+            update_index = process_index(storage_context=storage_context,
+                            pdf_parts=batch,
+                            session=session,
+                            update_index=update_index)
+            end_process_time = time.time()
+            visualize(index=update_index,
+                      file_name="./visuals/total_knowledge_graph.html")
+            visualize(index=update_index,
+                      file_name=f'./visuals/parts/total_knowledge_graph_{i}.html')
+            end_batch_time = time.time()
+        
+            time_taken_process = end_process_time - start_time
+            time_taken_batch = end_batch_time - start_time
+            #logging.info(f"Time taken for processing process in batch {i+1}: {time_taken_process:.5f} seconds")
+            #logging.info(f"Time taken for processing complete batch {i+1}: {time_taken_batch:.5f} seconds")
+            process_performance = {"batch:":i+1, "process time":time_taken_process, "batch time":time_taken_batch}  
+            batch_data_frame_temp =  pd.DataFrame([process_performance])
+            batch_data_frame = pd.concat([batch_data_frame,batch_data_frame_temp], ignore_index=True)
+            batch_data_frame.to_csv('./visuals/batch_times.csv')
+    return update_index
 def init_kg_index(group_size=5) -> KnowledgeGraphIndex:
     # Specify the directory path
     dir_path = INPUT_DIR
@@ -435,5 +485,5 @@ def get_existing_index() -> KnowledgeGraphIndex:
 init_kg_llm()
 
 if __name__ == "__main__":
-    index,_ = init_kg_index(10)
+    index,_ = init_kg_index(1)
     chat_cmd(index)

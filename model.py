@@ -170,7 +170,7 @@ def scrapweb(url, embed_model):
     # Start scraping from a base URL
     documents = scraper.load_data(base_url=url)
     add_to_collection(documents, embed_model)
-    updated_index = refresh_collection(embed_model)
+    updated_index = refresh_collection()
     return updated_index
 
 
@@ -209,7 +209,7 @@ def first_load():
     return index
 
 
-def load_documents(local_path=INPUT_DIR):
+def load_documents(local_path=INPUT_DIR,num_workers=4):
     logging.info ("loading documents")
     start = time.perf_counter_ns()
 
@@ -220,7 +220,7 @@ def load_documents(local_path=INPUT_DIR):
         reader = SimpleDirectoryReader(
             input_dir=local_path, recursive=True, filename_as_id=True
         )
-        documents = reader.load_data(show_progress=True)
+        documents = reader.load_data(show_progress=True,num_workers=num_workers)
     end = time.perf_counter_ns()
     logging.info("process  documents in %d ms", (end - start) * 1e-6)
     logging.info ("loading documents ... complete")
