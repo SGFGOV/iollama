@@ -29,6 +29,7 @@ import config
 load_dotenv()
 
 batch_data_frame = pd.DataFrame(columns=["batch","process time","batch time"])
+batch_data_frame=pd.read_csv('./visuals/batch_times.csv')
 
 SPACE_NAME = "llamaindex"
 edge_types, rel_prop_names = ["relationship"], [
@@ -42,7 +43,7 @@ nebula_host = os.environ["NEBULA_HOST"]
 nebula_port = os.environ["NEBULA_PORT"]
 INPUT_DIR = "./docs"
 TEMP_INPUT_DIR = f"./tmp"
-TEMP_PROCESSING_DIR =f"./processing"
+TEMP_BACKUP_DIR =f"./processing"
 COLLECTION_NAME = "iollama"
 embedding = None
 GRAPH_DIR = "./graph_2"
@@ -163,7 +164,7 @@ def generate_nebula_graph_single_document_and_persist(
         # include_embeddings=False,
         #index._max_object_length=100,
         
-        
+
 
         start_refresh_part_time = time.time()
         kg_index.refresh(documents, show_progress=True,num_workers=4)
@@ -213,7 +214,7 @@ def delete_temp():
 
 def copy_files_to_temp(document_paths: List[str]):
     destination_dir = TEMP_INPUT_DIR
-    backup_dir = TEMP_PROCESSING_DIR
+    backup_dir = TEMP_BACKUP_DIR
     os.makedirs(destination_dir, exist_ok=True)
     os.makedirs(backup_dir, exist_ok=True)
 
@@ -242,13 +243,13 @@ def copy_files_to_temp(document_paths: List[str]):
 
 def process_index(storage_context:StorageContext,pdf_parts:List[Document],
                   session:Session,update_index:KnowledgeGraphIndex):
-    logging.info(f'There are {len(pdf_parts)} nodes to process')
+    logging.info(f'There are {len(pdf_parts)} parts to process')
     if update_index != None:
         # old_index = load_index_from_storage(storage_context)
         # update_index = old_index
         skip = False
     else:
-        logging.info("unable to loadindices")
+        logging.info("unable to load indices")
         skip = True
         update_index, _ = init_index(
             pdf_parts, storage_context=storage_context, session=session
@@ -268,6 +269,52 @@ def process_index(storage_context:StorageContext,pdf_parts:List[Document],
     #         logging.error(e)
     os.makedirs(GRAPH_DIR, exist_ok=True)
     storage_context.persist(GRAPH_DIR)
+    return update_index
+
+def process_batch(index_number:int,batch_size:int,pdf_parts:List[Document],
+                  storage_context:StorageContext,
+                  session:Session,
+                  update_index: KnowledgeGraphIndex)->KnowledgeGraphIndex:
+    # Calculate the start and end indices for the current batch
+    start_index = index_number * batch_size
+    end_index = start_index + batch_size
+    # as knowledge index doesn't support deletes we can only insert new documents
+    while start_index<end_index:
+        id = pdf_parts[start_index].get_doc_id()
+        existing_doc_hash = update_index.docstore.get_document_hash(
+                id
+            )
+        if existing_doc_hash :
+            start_index = start_index+1
+            logging.debug(f'skipping ${id}')
+    if start_index == end_index :
+        return
+    # Slice the list to get the current batch
+    batch = pdf_parts[start_index:end_index]
+    logging.info("finished skipping files")
+    if len(batch) > 0:
+        start_time = time.time()
+        update_index = process_index(storage_context=storage_context,
+                        pdf_parts=batch,
+                        session=session,
+                        update_index=update_index)
+        end_process_time = time.time()
+        visualize(index=update_index,
+                file_name="./visuals/total_knowledge_graph.html")
+        visualize(index=update_index,
+                file_name=f'./visuals/parts/total_knowledge_graph_{index_number}.html')
+        end_batch_time = time.time()
+    
+        time_taken_process = end_process_time - start_time
+        time_taken_batch = end_batch_time - start_time
+        #logging.info(f"Time taken for processing process in batch {i+1}: {time_taken_process:.5f} seconds")
+        #logging.info(f"Time taken for processing complete batch {i+1}: {time_taken_batch:.5f} seconds")
+        process_performance = {"batch:":index_number+1, "process time":time_taken_process, "batch time":time_taken_batch}  
+        batch_data_frame_temp =  pd.DataFrame([process_performance])
+        batch_data_frame = pd.concat([batch_data_frame,batch_data_frame_temp], ignore_index=True)
+        batch_data_frame.to_csv('./visuals/batch_times.csv')
+    else: 
+        logging.info("Nothing to process in batch")
     return update_index
 
 
@@ -290,35 +337,28 @@ def update_document_index(storage_context: StorageContext, session: Session,
             num_batches += 1
         os.makedirs('./visuals/parts',exist_ok=True)
         # Process each batch
-        for i in tqdm(range(num_batches)):
-            # Calculate the start and end indices for the current batch
-            start_index = i * batch_size
-            end_index = start_index + batch_size
-            
-            # Slice the list to get the current batch
-            batch = pdf_parts[start_index:end_index]
-            start_time = time.time()
-            update_index = process_index(storage_context=storage_context,
-                            pdf_parts=batch,
-                            session=session,
-                            update_index=update_index)
-            end_process_time = time.time()
-            visualize(index=update_index,
-                      file_name="./visuals/total_knowledge_graph.html")
-            visualize(index=update_index,
-                      file_name=f'./visuals/parts/total_knowledge_graph_{i}.html')
-            end_batch_time = time.time()
-        
-            time_taken_process = end_process_time - start_time
-            time_taken_batch = end_batch_time - start_time
-            #logging.info(f"Time taken for processing process in batch {i+1}: {time_taken_process:.5f} seconds")
-            #logging.info(f"Time taken for processing complete batch {i+1}: {time_taken_batch:.5f} seconds")
-            process_performance = {"batch:":i+1, "process time":time_taken_process, "batch time":time_taken_batch}  
-            batch_data_frame_temp =  pd.DataFrame([process_performance])
-            batch_data_frame = pd.concat([batch_data_frame,batch_data_frame_temp], ignore_index=True)
-            batch_data_frame.to_csv('./visuals/batch_times.csv')
-    return update_index
-def init_kg_index(group_size=5) -> KnowledgeGraphIndex:
+        for i in tqdm(range(num_batches),total=num_batches):
+                logging.info('processing batch ${index} of {num_batches}')
+                update_index = process_batch(index_number=i,
+                                             batch_size=batch_size,
+                                             pdf_parts=pdf_parts,
+                    storage_context=storage_context,session=session,update_index=update_index)
+        return update_index
+def list_all_files_in_directory_and_subdirectories(directory_path):
+    # Initialize an empty list to store the file paths
+    file_paths = []
+    
+    # Walk through the directory and its subdirectories
+    for dirpath, dirnames, filenames in os.walk(directory_path):
+        # Iterate over each file in the current directory
+        for filename in filenames:
+            # Construct the full file path
+            file_path = os.path.join(dirpath, filename)
+            # Add the file path to the list
+            file_paths.append(file_path)
+    
+    return file_paths
+def init_kg_index(doc_group_size=5) -> KnowledgeGraphIndex:
     # Specify the directory path
     dir_path = INPUT_DIR
     document_paths: List[str] = []
@@ -333,7 +373,7 @@ def init_kg_index(group_size=5) -> KnowledgeGraphIndex:
     batch: List[str] = []
     # Use os.walk to list all files in the directory and its subdirectories
     try:
-        old_index = load_index_from_storage(storage_context)
+        old_index = load_index_from_storage(storage_context,show_progress=True,include_embeddings=True)
         update_index = old_index
         skip = False
     except Exception as e:
@@ -343,18 +383,20 @@ def init_kg_index(group_size=5) -> KnowledgeGraphIndex:
             # Construct the full file path
             file_path = os.path.join(root, file)
             document_paths.insert(0, file_path)
-    for idx, path in tqdm(enumerate(document_paths), "processing files"):
-        remainder = (idx + 1) % group_size
+    for idx, path in tqdm(enumerate(document_paths), "processing files",total=len(document_paths)):
+        remainder = (idx + 1) % doc_group_size
         batch.insert(0, path)
         if not remainder:
-            copy_files_to_temp(batch)
+            files =  list_all_files_in_directory_and_subdirectories(directory_path=TEMP_INPUT_DIR)
+            if files and len(files) == 0:
+                copy_files_to_temp(batch)
             update_index = update_document_index(
                 storage_context=storage_context, session=session,
                 update_index=update_index
             )
             batch.clear()
             delete_temp()
-    if len(batch) < group_size:
+    if len(batch) < doc_group_size:
         copy_files_to_temp(batch)
         update_index = update_document_index(
             storage_context=storage_context, session=session,
@@ -418,8 +460,8 @@ def chat(input_question, user, index: KnowledgeGraphIndex):
 
     try:
         storage_context = get_graph_store()
-        engine = index.as_chat_engine(llm=Settings.llm)
-        response = engine.chat(message=input_question)
+        engine = index.as_chat_engine(llm=Settings.llm,max_iterations = 100)
+        response = engine.chat(message=f'Take some time and answer carefuly the following question. {input_question}')
         # response = kg_query(llm=Settings.llm,storage_context=storage_context,theQuestion=input_question)
 
         logging.info("got response from llm - %s", response)

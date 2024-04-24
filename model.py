@@ -236,7 +236,7 @@ def refresh_collection():
     print(f"using chorma {chroma_client.get_version()}")
 
     # Todo fix memory leak
-    documents = load_documents()
+    documents = load_documents(local_path="./docs/fundamentals/pdf-docs")
     
     index = load_existing_store()
 
@@ -345,6 +345,9 @@ def chat_cmd():
         input_question = input("Enter your question (or 'exit' to quit): ")
         if input_question.lower() == "exit":
             break
+        if input_question.lower() == 'refresh':
+            refresh_collection()
+            continue
         try:
             response, references = chat(input_question, "test-user")
             logging.info("got response from llm - %s \nReferences:\n\n", response)
